@@ -1,0 +1,4 @@
+interface:
+  display_name: "Physics Lab Report FastGen"
+  short_description: "Build and verify Chinese physics lab report DOCX files"
+  default_prompt: "使用 $physics-lab-report-fastgen 根据实验指导书、DOCX 模板、图片和数据生成报告副本。"
