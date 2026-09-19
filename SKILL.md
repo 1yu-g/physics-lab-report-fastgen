@@ -1,33 +1,14 @@
 ---
 name: physics-lab-report-fastgen
-description: Prepare, generate, and verify Chinese university physics lab report DOCX files from a guide, optional template, photos of raw records, and real data. Use for pre-lab or full reports needing table OCR, calculations, formulas, figures, template preservation, or page review.
+description: Generate and verify Chinese university physics lab reports in DOCX from supplied guides, templates, figures, or real measurements. Use for pre-lab and full reports that need source-grounded writing, optional table OCR/data analysis, and page review.
 ---
 
 # Physics Lab Report FastGen
 
-Use scripts/workflow.py to turn report production into three repeatable stages. The script handles files and checks; you remain responsible for understanding the guide, writing accurate content, selecting appropriate figures, and inspecting rendered pages.
+1. Read the user's materials and scope once. For a new report, run `scripts/workflow.py prepare` to inventory sources and create `work/report.json`; do not rerun it just to revise an existing draft. Fill the JSON from the guide and verified records. Preserve the original template and cover, create a separate DOCX, and never invent measurements or observations.
+2. Run `scripts/workflow.py run --workdir work` after drafting. If calculations are needed, set `analysis_plan` in `report.json`; the same run computes results, fills `{{result...}}` fields, and generates figures marked with `fit_id`. For a photographed table, first use `table_ocr.py extract`, compare its CSV cell by cell with the source, correct it, and use `verify` before analysis. Read [advanced-workflow.md](references/advanced-workflow.md) only for this path.
+3. Inspect every rendered page for scope, cover, watermark, layout, editable tables, figures, captions, mathematical symbols, units, and two-character body indentation. Fix visible defects and rerun only when needed. If automatic rendering is unavailable, export the existing DOCX to PDF and call `scripts/workflow.py preview --workdir work --pdf report.pdf`; this does not rebuild the DOCX. Mark reviewed pages `pass` in `work/review.json`, then run `finalize`.
 
-## Workflow
+The script's structural checks cannot verify scientific truth or visual quality. Deliver only when `work/delivery.json` reports `pass`; state any real limitation. Keep private source files and work directories out of public repositories.
 
-1. Run prepare once with the guide, template, images, data, requested sections, and scope. Read inventory.json and the extracted text before drafting.
-2. Fill the generated report.json using only verified source facts. Keep the requested section order. Do not invent measurements, experimental outcomes, images, or uncertainty values. Mark predicted results as predictions.
-3. Run run. It copies the template, builds a separate DOCX, performs structural QA, and creates page previews when LibreOffice and pdftoppm are available. If PDF conversion is unavailable, export the finished DOCX to PDF and pass --pdf.
-4. Open every page preview. Check the cover, scope, watermarks, page breaks, formulas, variables and units, figures, captions, and editable tables. Correct defects and rerun. Mark each inspected page pass in review.json, then run finalize.
-5. Deliver only after delivery.json reports pass. Include the output file and any real limitations.
-
-~~~powershell
-python scripts/workflow.py prepare --workdir work --guide guide.pdf --template template.docx --section "一、实验目的" --section "二、实验原理" --scope "仅前两项，封面不动"
-# Complete work/report.json from the inspected source material.
-python scripts/workflow.py run --workdir work
-python scripts/workflow.py finalize --workdir work
-~~~
-
-Prepare never overwrites an existing report.json. Run rejects empty sections and checks that the source template hash is unchanged. The script cannot judge whether a measurement is true or an image has a watermark; those require source review.
-
-Read [references/spec-schema.md](references/spec-schema.md) when writing report JSON. Read [references/workflow.md](references/workflow.md) for renderer setup, review statuses, and old DOC templates.
-
-## Optional data and figure path
-
-When the inputs include a photographed raw-data table, calculation requirements, or requested generated figures, read [references/advanced-workflow.md](references/advanced-workflow.md). Use table_ocr.py to propose cells, compare every cell with the source, and explicitly verify the corrected CSV before analyze_data.py consumes it. Use the experiment's own formulas and uncertainty rules; check units and retain the source and calculation hashes. Use figure_tools.py for reversible image preparation, plots from verified data, and explicitly specified schematic diagrams. Then reference the verified analysis manifest from report.json and inspect every rendered report page.
-
-Keep these optional dependencies off the ordinary text-only report path. Never present an OCR guess, generated schematic, or synthetic image as an observed measurement or photograph.
+Read [spec-schema.md](references/spec-schema.md) when editing report JSON. Read [workflow.md](references/workflow.md) for renderer setup, review status, or old DOC templates.

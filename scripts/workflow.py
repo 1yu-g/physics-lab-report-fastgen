@@ -243,17 +243,36 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     inventory = fastgen.load(inventory_path) if inventory_path.is_file() else {}
     spec_path = Path(spec_path or workdir / "report.json").resolve()
     spec = fastgen.load(spec_path)
+    plan_ref, manifest_ref = spec.get("analysis_plan"), spec.get("analysis_manifest")
+    if plan_ref and manifest_ref:
+        raise ValueError("Use analysis_plan or analysis_manifest, not both.")
     analysis_path = None
-    if spec.get("analysis_manifest"):
+    if plan_ref or manifest_ref:
         import analyze_data
-        analysis_path = Path(spec["analysis_manifest"])
-        analysis_path = (analysis_path if analysis_path.is_absolute()
-                         else spec_path.parent / analysis_path).resolve()
+        if plan_ref:
+            plan_path = Path(plan_ref)
+            plan_path = (plan_path if plan_path.is_absolute()
+                         else spec_path.parent / plan_path).resolve()
+            analysis_path = Path(analyze_data.analyze(plan_path, workdir / "analysis")["analysis"])
+        else:
+            analysis_path = Path(manifest_ref)
+            analysis_path = (analysis_path if analysis_path.is_absolute()
+                             else spec_path.parent / analysis_path).resolve()
         analysis = analyze_data.check_analysis(analysis_path)
         spec = resolve_results(spec, analysis)
-        for section in spec.get("sections", []):
-            for block in section.get("blocks", []):
-                if block.get("type") == "figure":
+        for section_index, section in enumerate(spec.get("sections", []), 1):
+            for block_index, block in enumerate(section.get("blocks", []), 1):
+                if block.get("type") != "figure":
+                    continue
+                if block.get("fit_id"):
+                    if block.get("path"):
+                        raise ValueError("Fit figure uses fit_id instead of path.")
+                    import figure_tools
+                    figure_path = workdir / "figures" / f"fit-{section_index}-{block_index}.png"
+                    figure_tools.plot_fit(analysis_path, str(block["fit_id"]),
+                                          figure_path, block.get("plot_title", ""))
+                    block["path"] = str(figure_path.resolve())
+                else:
                     image_path = Path(block.get("path", ""))
                     if not image_path.is_absolute():
                         block["path"] = str((spec_path.parent / image_path).resolve())
@@ -262,7 +281,7 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
         build_spec_path = resolved_spec
     else:
         if RESULT_TOKEN.search(json.dumps(spec, ensure_ascii=False)):
-            raise ValueError("Result placeholders need an analysis_manifest.")
+            raise ValueError("Result placeholders need an analysis_plan or analysis_manifest.")
         build_spec_path = spec_path
     counts = validate_spec(spec, build_spec_path.parent, inventory.get("requested_sections", []))
     if template is None:
@@ -289,10 +308,14 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     fastgen.dump(output.with_suffix(".qa.json"), qa)
     if qa["status"] != "pass":
         raise RuntimeError(f"Structural QA failed: {output.with_suffix('.qa.json')}")
-    pdf_path, previews = render(output, workdir / "preview", pdf, renderer)
+    return _write_review(workdir, output, pdf, renderer)
+
+
+def _write_review(workdir: Path, docx: Path, pdf, renderer):
+    pdf_path, previews = render(docx, workdir / "preview", pdf, renderer)
     review = {
         "status": "needs-visual-review" if previews else "render-unavailable",
-        "docx": str(output), "docx_sha256": fastgen.sha256(output),
+        "docx": str(docx), "docx_sha256": fastgen.sha256(docx),
         "pdf": str(pdf_path) if pdf_path else None,
         "criteria": ["scope", "cover", "no_watermark", "page_layout", "figures",
                      "tables", "formula_symbols", "units", "captions", "data_provenance"],
@@ -303,12 +326,12 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     }
     review_path = workdir / "review.json"
     fastgen.dump(review_path, review)
-    return {"status": review["status"], "docx": str(output), "qa": str(output.with_suffix(".qa.json")),
+    return {"status": review["status"], "docx": str(docx),
+            "qa": str(docx.with_suffix(".qa.json")),
             "review": str(review_path), "pages": len(previews)}
 
 
-def finalize(workdir: Path):
-    workdir = workdir.resolve()
+def _checked_report(workdir: Path):
     review = fastgen.load(workdir / "review.json")
     docx = Path(review["docx"])
     qa = fastgen.load(docx.with_suffix(".qa.json"))
@@ -320,6 +343,18 @@ def finalize(workdir: Path):
         if fastgen.sha256(analysis_path) != qa["analysis_sha256"]:
             raise ValueError("Analysis changed after report generation; run again.")
         analyze_data.check_analysis(analysis_path)
+    return review, docx
+
+
+def preview(workdir: Path, pdf: Path):
+    workdir = workdir.resolve()
+    _, docx = _checked_report(workdir)
+    return _write_review(workdir, docx, pdf, "none")
+
+
+def finalize(workdir: Path):
+    workdir = workdir.resolve()
+    review, docx = _checked_report(workdir)
     pages = review.get("pages", [])
     if (not pages or
         [page.get("page") for page in pages] != list(range(1, len(pages) + 1)) or
@@ -350,6 +385,9 @@ def cli():
     p.add_argument("--output", type=Path)
     p.add_argument("--pdf", type=Path, help="Use a PDF already exported from this DOCX")
     p.add_argument("--renderer", choices=("auto", "none"), default="auto")
+    p = sub.add_parser("preview", help="Render an exported PDF without rebuilding the DOCX")
+    p.add_argument("--workdir", type=Path, required=True)
+    p.add_argument("--pdf", type=Path, required=True)
     p = sub.add_parser("finalize", help="Verify page-by-page review and mark delivery ready")
     p.add_argument("--workdir", type=Path, required=True)
     return parser.parse_args()
@@ -363,6 +401,8 @@ def main():
                              args.data, args.section, args.scope)
         elif args.command == "run":
             result = run(args.workdir, args.spec, args.template, args.output, args.pdf, args.renderer)
+        elif args.command == "preview":
+            result = preview(args.workdir, args.pdf)
         else:
             result = finalize(args.workdir)
         print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -72,7 +72,9 @@ class WorkflowIntegrationTest(unittest.TestCase):
                 writer.add_blank_page(width=595, height=842)
                 with pdf.open("wb") as stream:
                     writer.write(stream)
-                result = workflow.run(work, pdf=pdf)
+                built_hash = fastgen.sha256(Path(result["docx"]))
+                result = workflow.preview(work, pdf)
+                self.assertEqual(fastgen.sha256(Path(result["docx"])), built_hash)
                 self.assertEqual(result["status"], "needs-visual-review")
                 self.assertEqual(result["pages"], 1)
                 review = fastgen.load(work / "review.json")

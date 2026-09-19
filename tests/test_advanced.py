@@ -80,7 +80,24 @@ class AdvancedWorkflowTest(unittest.TestCase):
             body = "\n".join(p.text for p in Document(built["docx"]).paragraphs)
             self.assertIn("1.960", body)
             self.assertEqual(fastgen.load(built["qa"])["analysis_manifest"], str(analysis_path))
+            automatic = root / "automatic"
+            automatic.mkdir()
+            fastgen.dump(automatic / "report.json", {
+                "title": "自动分析测试报告", "analysis_plan": str(plan),
+                "sections": [{"title": "一、结果", "blocks": [
+                    {"type": "paragraph", "text": "斜率 {{result.fit.slope.value:.3f}}"},
+                    {"type": "figure", "fit_id": "fit", "caption": "拟合与残差图"}
+                ]}]
+            })
+            generated = workflow.run(automatic, renderer="none")
+            self.assertEqual(generated["status"], "render-unavailable")
+            self.assertTrue((automatic / "figures" / "fit-1-2.png").is_file())
+            self.assertTrue((automatic / "analysis" / "analysis.json").is_file())
+            self.assertIn("1.960", "\n".join(
+                p.text for p in Document(generated["docx"]).paragraphs))
             csv_path.write_text("I_mA,U_mV\n1,999\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                workflow.run(automatic, renderer="none")
             with self.assertRaisesRegex(ValueError, "source changed"):
                 analyze_data.check_analysis(analysis_path)
 

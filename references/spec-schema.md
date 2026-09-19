@@ -9,6 +9,8 @@ The builder reads UTF-8 JSON. Figure paths are resolved relative to the JSON fil
 - **fields**: Additional placeholders. A key 姓名 replaces {{姓名}}.
 - **settings**: Fonts, sizes, spacing, margins, and default image width.
 - **sections**: Ordered report sections.
+- **analysis_plan** (optional): Relative path to a data-analysis plan; `run` computes and links results.
+- **analysis_manifest** (optional): Existing analysis result; mutually exclusive with `analysis_plan`.
 
 ## Section
 
@@ -74,10 +76,12 @@ The first row is shaded and marked as a repeating header. Rows are kept from spl
 ~~~
 
 
-## Full workflow
+## Analysis and generated fit figures
 
-Use scripts/workflow.py prepare to create inventory.json and a blank report.json, scripts/workflow.py run to build and render, then inspect each preview page before scripts/workflow.py finalize. See [workflow.md](workflow.md).
+The optional root field `analysis_plan` points to an analysis-plan.json file. `workflow.py run` then computes verified results and writes `work/analysis/analysis.json`. A figure block with `fit_id` instead of `path` generates a fit/residual plot from the named linear-fit result:
 
-## Verified analysis results
+~~~json
+{"type": "figure", "fit_id": "fit", "caption": "拟合与残差图"}
+~~~
 
-The optional root field analysis_manifest points to analysis.json produced by analyze_data.py. workflow.py verifies the raw CSV, OCR review (when present), config, and residual data before building or finalizing. Scalar placeholders such as {{result.fit.slope.value:.4g}} and {{result.fit.slope.unit}} are expanded from that manifest; the format after the colon uses Python numeric formatting. Keep units and significant figures consistent with the experiment instructions. See [advanced-workflow.md](advanced-workflow.md).
+Scalar placeholders such as `{{result.fit.slope.value:.4g}}` and `{{result.fit.slope.unit}}` are filled from the analysis. The format after the colon uses Python numeric formatting. For an analysis already run separately, use the legacy `analysis_manifest` root field instead of `analysis_plan`. See [advanced-workflow.md](advanced-workflow.md) for the data plan and review gate.
