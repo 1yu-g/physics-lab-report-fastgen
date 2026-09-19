@@ -1,0 +1,2 @@
+-r requirements-analysis.txt
+schemdraw>=0.20

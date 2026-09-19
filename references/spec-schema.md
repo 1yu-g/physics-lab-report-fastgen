@@ -77,3 +77,7 @@ The first row is shaded and marked as a repeating header. Rows are kept from spl
 ## Full workflow
 
 Use scripts/workflow.py prepare to create inventory.json and a blank report.json, scripts/workflow.py run to build and render, then inspect each preview page before scripts/workflow.py finalize. See [workflow.md](workflow.md).
+
+## Verified analysis results
+
+The optional root field analysis_manifest points to analysis.json produced by analyze_data.py. workflow.py verifies the raw CSV, OCR review (when present), config, and residual data before building or finalizing. Scalar placeholders such as {{result.fit.slope.value:.4g}} and {{result.fit.slope.unit}} are expanded from that manifest; the format after the colon uses Python numeric formatting. Keep units and significant figures consistent with the experiment instructions. See [advanced-workflow.md](advanced-workflow.md).

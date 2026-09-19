@@ -1,6 +1,6 @@
 ---
 name: physics-lab-report-fastgen
-description: Prepare, generate, and verify Chinese university physics lab report DOCX files from a supplied guide, optional DOCX template, figures, and real data. Use for pre-lab or full reports when template preservation, formulas, tables, and rendered page review matter.
+description: Prepare, generate, and verify Chinese university physics lab report DOCX files from a guide, optional template, photos of raw records, and real data. Use for pre-lab or full reports needing table OCR, calculations, formulas, figures, template preservation, or page review.
 ---
 
 # Physics Lab Report FastGen
@@ -25,3 +25,9 @@ python scripts/workflow.py finalize --workdir work
 Prepare never overwrites an existing report.json. Run rejects empty sections and checks that the source template hash is unchanged. The script cannot judge whether a measurement is true or an image has a watermark; those require source review.
 
 Read [references/spec-schema.md](references/spec-schema.md) when writing report JSON. Read [references/workflow.md](references/workflow.md) for renderer setup, review statuses, and old DOC templates.
+
+## Optional data and figure path
+
+When the inputs include a photographed raw-data table, calculation requirements, or requested generated figures, read [references/advanced-workflow.md](references/advanced-workflow.md). Use table_ocr.py to propose cells, compare every cell with the source, and explicitly verify the corrected CSV before analyze_data.py consumes it. Use the experiment's own formulas and uncertainty rules; check units and retain the source and calculation hashes. Use figure_tools.py for reversible image preparation, plots from verified data, and explicitly specified schematic diagrams. Then reference the verified analysis manifest from report.json and inspect every rendered report page.
+
+Keep these optional dependencies off the ordinary text-only report path. Never present an OCR guess, generated schematic, or synthetic image as an observed measurement or photograph.

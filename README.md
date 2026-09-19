@@ -47,6 +47,20 @@ python scripts/workflow.py finalize --workdir work
 
 只有结构检查通过、每页均标记检查通过且 DOCX 自复核后未变化，才会生成 work/delivery.json，状态为 pass。旧版 DOC 模板需要先转换为 DOCX。
 
+## 原始记录表、计算和图像
+
+进阶功能按需安装，不影响普通报告：requirements-ocr.txt 提供表格识别，requirements-analysis.txt 提供统计、拟合、公式与单位计算，requirements-figures.txt 提供电路示意图。也可安装 requirements-extended.txt。已有本地 skill 可用 `pwsh -File scripts/install_skill.ps1 -Update` 更新。
+
+~~~powershell
+python scripts/table_ocr.py extract --input "原始记录表.jpg" --output-dir work/ocr
+# 对照原图核对并修正 CSV 后：
+python scripts/table_ocr.py verify --manifest work/ocr/ocr-review.json --table-id 1 --note "逐格核对并修正"
+python scripts/analyze_data.py run --config work/analysis-plan.json --output-dir work/analysis
+python scripts/figure_tools.py plot --analysis work/analysis/analysis.json --fit-id fit --output work/fit.png
+~~~
+
+分析结果可以通过 report.json 的 analysis_manifest 及结果占位符进入报告；未经核对的 OCR 表格会被拒绝。详细配置、原图预处理和示意图生成命令见 [advanced-workflow.md](references/advanced-workflow.md)。
+
 ## JSON 输入
 
 report.json 的每个章节包含 title、可选的 anchor 和有序 blocks。支持 paragraph、formula、figure、table、page_break。变量可用段落 segments 标注斜体及上下标；公式中的 U_H、x^2 或 U_{H} 会形成 Word 原生上下标。详细格式见 [spec-schema.md](references/spec-schema.md)。

@@ -208,13 +208,63 @@ def render(docx_path: Path, preview_dir: Path, pdf_path=None, renderer="auto"):
     return pdf_path, previews
 
 
+RESULT_TOKEN = re.compile(r"\{\{result\.([A-Za-z_][A-Za-z0-9_.]*)(?::([^{}]+))?\}\}")
+
+
+def resolve_results(spec, analysis):
+    def lookup(reference):
+        value = analysis["results"]
+        for part in reference.split("."):
+            if not isinstance(value, dict) or part not in value:
+                raise ValueError(f"Unknown analysis result: {reference}")
+            value = value[part]
+        if isinstance(value, (dict, list)):
+            raise ValueError(f"Analysis result is not scalar: {reference}")
+        return value
+
+    def replace(value):
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, str):
+            def match_value(match):
+                result = lookup(match.group(1))
+                fmt = match.group(2)
+                return format(result, fmt) if fmt else str(result)
+            return RESULT_TOKEN.sub(match_value, value)
+        return value
+    return replace(spec)
+
+
 def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, renderer="auto"):
     workdir = workdir.resolve()
     inventory_path = workdir / "inventory.json"
     inventory = fastgen.load(inventory_path) if inventory_path.is_file() else {}
     spec_path = Path(spec_path or workdir / "report.json").resolve()
     spec = fastgen.load(spec_path)
-    counts = validate_spec(spec, spec_path.parent, inventory.get("requested_sections", []))
+    analysis_path = None
+    if spec.get("analysis_manifest"):
+        import analyze_data
+        analysis_path = Path(spec["analysis_manifest"])
+        analysis_path = (analysis_path if analysis_path.is_absolute()
+                         else spec_path.parent / analysis_path).resolve()
+        analysis = analyze_data.check_analysis(analysis_path)
+        spec = resolve_results(spec, analysis)
+        for section in spec.get("sections", []):
+            for block in section.get("blocks", []):
+                if block.get("type") == "figure":
+                    image_path = Path(block.get("path", ""))
+                    if not image_path.is_absolute():
+                        block["path"] = str((spec_path.parent / image_path).resolve())
+        resolved_spec = workdir / "resolved-report.json"
+        fastgen.dump(resolved_spec, spec)
+        build_spec_path = resolved_spec
+    else:
+        if RESULT_TOKEN.search(json.dumps(spec, ensure_ascii=False)):
+            raise ValueError("Result placeholders need an analysis_manifest.")
+        build_spec_path = spec_path
+    counts = validate_spec(spec, build_spec_path.parent, inventory.get("requested_sections", []))
     if template is None:
         template_item = next((x for x in inventory.get("files", []) if x["role"] == "template"), None)
         template = Path(template_item["path"]) if template_item else None
@@ -222,7 +272,7 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     template_hash = fastgen.sha256(template) if template else None
     template_images = len(Document(template).inline_shapes) if template else 0
     template_math = len(Document(template).element.xpath(".//m:oMath")) if template else 0
-    qa = fastgen.build(spec_path, output, template)
+    qa = fastgen.build(build_spec_path, output, template)
     if template and fastgen.sha256(template) != template_hash:
         raise RuntimeError("Source template changed during build.")
     for key, actual_key, baseline in (("figure", "inline_images", template_images),
@@ -233,6 +283,9 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
             qa.setdefault("count_mismatch", {})[key] = {"expected": counts[key], "actual": actual}
     if qa["table_blocks"] != counts["table"]:
         qa["status"] = "needs-fix"
+    if analysis_path:
+        qa["analysis_manifest"] = str(analysis_path)
+        qa["analysis_sha256"] = fastgen.sha256(analysis_path)
     fastgen.dump(output.with_suffix(".qa.json"), qa)
     if qa["status"] != "pass":
         raise RuntimeError(f"Structural QA failed: {output.with_suffix('.qa.json')}")
@@ -242,7 +295,7 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
         "docx": str(output), "docx_sha256": fastgen.sha256(output),
         "pdf": str(pdf_path) if pdf_path else None,
         "criteria": ["scope", "cover", "no_watermark", "page_layout", "figures",
-                     "tables", "formula_symbols", "units", "captions"],
+                     "tables", "formula_symbols", "units", "captions", "data_provenance"],
         "pages": [
             {"page": i, "preview": str(path), "status": "pending", "notes": ""}
             for i, path in enumerate(previews, 1)
@@ -261,6 +314,12 @@ def finalize(workdir: Path):
     qa = fastgen.load(docx.with_suffix(".qa.json"))
     if qa["status"] != "pass" or fastgen.sha256(docx) != review["docx_sha256"]:
         raise ValueError("DOCX changed after QA or structural QA did not pass; run again.")
+    if qa.get("analysis_manifest"):
+        import analyze_data
+        analysis_path = Path(qa["analysis_manifest"])
+        if fastgen.sha256(analysis_path) != qa["analysis_sha256"]:
+            raise ValueError("Analysis changed after report generation; run again.")
+        analyze_data.check_analysis(analysis_path)
     pages = review.get("pages", [])
     if (not pages or
         [page.get("page") for page in pages] != list(range(1, len(pages) + 1)) or
