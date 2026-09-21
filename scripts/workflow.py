@@ -128,6 +128,7 @@ def record(path: Path, role: str, text_dir: Path, index: int, cache_dir: Path | 
             if not text_path.is_file() or text_path.read_text(encoding="utf-8") != content:
                 text_path.write_text(content, encoding="utf-8")
             item["extracted_text"] = str(text_path.resolve())
+            item["extracted_text_sha256"] = fastgen.sha256(text_path)
         if role == "template" and path.suffix.lower() == ".docx":
             item["headings"] = [line.strip() for line in content.splitlines() if HEAD.match(line.strip())]
             item["placeholders"] = sorted(set(PLACEHOLDER.findall(content)))
@@ -186,6 +187,15 @@ def prepare(workdir: Path, guides, template, images, data, sections, scope, prof
     return {"inventory": str(inventory_path), "draft_spec": str(spec_path),
             "files": len(files), "sections": len(chosen),
             "cache_hits": sum(bool(item.get("cache_hit")) for item in files)}
+
+
+def start(workdir: Path, guides, template, images, data, sections, scope,
+          profile=None, refresh_draft=False):
+    prepared = prepare(workdir, guides, template, images, data, sections, scope, profile)
+    import draft_report
+    drafted = draft_report.scaffold(Path(prepared["inventory"]),
+                                     Path(prepared["draft_spec"]), refresh_draft)
+    return {**prepared, "draft": drafted}
 
 
 def validate_spec(spec: dict, base: Path, required_sections):
@@ -247,6 +257,7 @@ DEPENDENCY_GROUPS = {
         "pint": "pint", "uncertainties": "uncertainties", "matplotlib": "matplotlib",
     },
     "ocr": {"img2table": "img2table", "rapidocr": "img2table[rapidocr]"},
+    "complex": {"docling": "docling"},
 }
 
 
@@ -255,7 +266,8 @@ def preflight(mode="core"):
         "core": ("core",),
         "analysis": ("core", "analysis"),
         "ocr": ("core", "ocr"),
-        "full": tuple(DEPENDENCY_GROUPS),
+        "complex": ("core", "complex"),
+        "full": ("core", "analysis", "ocr"),
     }
     if mode not in modes:
         raise ValueError(f"Unknown preflight mode: {mode}")
@@ -383,6 +395,11 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     inventory = fastgen.load(inventory_path) if inventory_path.is_file() else {}
     spec_path = Path(spec_path or workdir / "report.json").resolve()
     spec = fastgen.load(spec_path)
+    if spec.get("draft_status") == "source-extract-needs-rewrite-and-verification":
+        raise ValueError(
+            "Source excerpts are still marked as an unreviewed draft; rewrite and verify them, "
+            "then set draft_status to reviewed before building."
+        )
     plan_ref, manifest_ref = spec.get("analysis_plan"), spec.get("analysis_manifest")
     if plan_ref and manifest_ref:
         raise ValueError("Use analysis_plan or analysis_manifest, not both.")
@@ -576,6 +593,16 @@ def cli():
     p.add_argument("--scope", default="")
     p.add_argument("--profile", type=Path,
                    help="Validate the template against a reusable template profile")
+    p = sub.add_parser("start", help="Prepare materials and create a source-grounded draft")
+    p.add_argument("--workdir", type=Path, required=True)
+    p.add_argument("--guide", action="append", type=Path, default=[])
+    p.add_argument("--template", type=Path)
+    p.add_argument("--image", action="append", type=Path, default=[])
+    p.add_argument("--data", action="append", type=Path, default=[])
+    p.add_argument("--section", action="append", default=[])
+    p.add_argument("--scope", default="")
+    p.add_argument("--profile", type=Path)
+    p.add_argument("--refresh-draft", action="store_true")
     p = sub.add_parser("run", help="Build, structurally check, and render page previews")
     p.add_argument("--workdir", type=Path, required=True)
     p.add_argument("--spec", type=Path)
@@ -589,7 +616,8 @@ def cli():
     p = sub.add_parser("finalize", help="Verify page-by-page review and mark delivery ready")
     p.add_argument("--workdir", type=Path, required=True)
     p = sub.add_parser("preflight", help="Check the runtime before starting a report")
-    p.add_argument("--mode", choices=("core", "analysis", "ocr", "full"), default="core")
+    p.add_argument("--mode", choices=("core", "analysis", "ocr", "complex", "full"),
+                   default="core")
     return parser.parse_args()
 
 
@@ -599,6 +627,10 @@ def main():
         if args.command == "prepare":
             result = prepare(args.workdir, args.guide, args.template, args.image,
                              args.data, args.section, args.scope, args.profile)
+        elif args.command == "start":
+            result = start(args.workdir, args.guide, args.template, args.image,
+                           args.data, args.section, args.scope, args.profile,
+                           args.refresh_draft)
         elif args.command == "run":
             result = run(args.workdir, args.spec, args.template, args.output, args.pdf, args.renderer)
         elif args.command == "preview":

@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $source = Split-Path -Parent $PSScriptRoot
-$items = @("SKILL.md", "agents", "scripts", "references", "requirements.txt", "requirements-analysis.txt", "requirements-ocr.txt", "requirements-figures.txt", "requirements-extended.txt")
+$items = @("SKILL.md", "agents", "scripts", "references", "requirements.txt", "requirements-analysis.txt", "requirements-ocr.txt", "requirements-figures.txt", "requirements-extended.txt", "requirements-complex.txt")
 
 if ((Test-Path -LiteralPath $Destination) -and -not $Update) {
     throw "Destination already exists: $Destination (use -Update to refresh project files)"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import importlib.util
 import json
 import posixpath
 import re
@@ -18,7 +20,7 @@ from pypdf import PdfReader
 
 import fastgen
 
-VERSION = "1"
+VERSION = "3"
 SUPPORTED = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".csv", ".tsv"}
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -46,24 +48,29 @@ def _write_csv(path: Path, rows):
 
 
 def _copy_zip_assets(archive: zipfile.ZipFile, prefix: str, output_dir: Path):
-    assets = []
+    assets, seen = [], {}
     for index, name in enumerate(sorted(n for n in archive.namelist() if n.startswith(prefix)), 1):
         if name.endswith("/"):
             continue
         suffix = Path(name).suffix.lower()
+        payload = archive.read(name)
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest in seen:
+            seen[digest].setdefault("source_members", []).append(name)
+            continue
         target = output_dir / f"image-{index:03d}{suffix}"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(archive.read(name))
-        assets.append({
-            "path": str(target), "sha256": fastgen.sha256(target),
-            "source_member": name, "kind": "image",
-        })
+        target.write_bytes(payload)
+        item = {"path": str(target), "sha256": digest,
+                "source_member": name, "source_members": [name], "kind": "image"}
+        assets.append(item)
+        seen[digest] = item
     return assets
 
 
 def _parse_pdf(source: Path, output_dir: Path):
     reader = PdfReader(source)
-    units, assets = [], []
+    units, assets, seen = [], [], {}
     asset_dir = output_dir / "assets"
     for page_number, page in enumerate(reader.pages, 1):
         text = page.extract_text() or ""
@@ -71,13 +78,18 @@ def _parse_pdf(source: Path, output_dir: Path):
         for image_number, image in enumerate(page.images, 1):
             name = Path(getattr(image, "name", "image.bin")).name
             suffix = Path(name).suffix or ".bin"
+            payload = image.data
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest in seen:
+                seen[digest]["pages"].append(page_number)
+                continue
             target = asset_dir / f"page-{page_number:03d}-image-{image_number:03d}{suffix}"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(image.data)
-            assets.append({
-                "path": str(target), "sha256": fastgen.sha256(target),
-                "page": page_number, "kind": "image",
-            })
+            target.write_bytes(payload)
+            item = {"path": str(target), "sha256": digest,
+                    "page": page_number, "pages": [page_number], "kind": "image"}
+            assets.append(item)
+            seen[digest] = item
     return units, [], assets
 
 
@@ -215,35 +227,55 @@ def _parse_delimited(source: Path, output_dir: Path):
     return [{"kind": "table", "index": 1, "text": text}], [item], []
 
 
-def _parse(source: Path, output_dir: Path):
+def _parse_docling(source: Path, output_dir: Path):
+    try:
+        from docling.document_converter import DocumentConverter
+    except ImportError as exc:
+        raise RuntimeError(
+            "The Docling backend is optional; install the project with the complex extra."
+        ) from exc
+    result = DocumentConverter().convert(str(source))
+    markdown = result.document.export_to_markdown()
+    artifact = output_dir / "docling.json"
+    fastgen.dump(artifact, result.document.export_to_dict())
+    return ([{"kind": "document", "index": 1, "text": markdown}], [], [], [{
+        "path": str(artifact), "sha256": fastgen.sha256(artifact), "kind": "docling_json",
+    }])
+
+
+def _parse(source: Path, output_dir: Path, backend: str):
+    if backend == "docling":
+        return _parse_docling(source, output_dir)
     suffix = source.suffix.lower()
     if suffix == ".pdf":
-        return _parse_pdf(source, output_dir)
+        return (*_parse_pdf(source, output_dir), [])
     if suffix == ".docx":
-        return _parse_docx(source, output_dir)
+        return (*_parse_docx(source, output_dir), [])
     if suffix == ".pptx":
-        return _parse_pptx(source, output_dir)
+        return (*_parse_pptx(source, output_dir), [])
     if suffix == ".xlsx":
-        return _parse_xlsx(source, output_dir)
+        return (*_parse_xlsx(source, output_dir), [])
     if suffix in {".csv", ".tsv"}:
-        return _parse_delimited(source, output_dir)
+        return (*_parse_delimited(source, output_dir), [])
     if suffix in {".txt", ".md"}:
-        return [{"kind": "document", "index": 1, "text": _decode(source)}], [], []
+        return [{"kind": "document", "index": 1, "text": _decode(source)}], [], [], []
     if suffix in IMAGE_TYPES:
         target = output_dir / "assets" / source.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-        return [], [], [{"path": str(target), "sha256": fastgen.sha256(target), "kind": "image"}]
+        return [], [], [{"path": str(target), "sha256": fastgen.sha256(target), "kind": "image"}], []
     raise ValueError(f"Unsupported material type: {suffix or source.name}")
 
 
-def _cache_valid(manifest, source: Path):
+def _cache_valid(manifest, source: Path, backend: str):
     if (manifest.get("version") != VERSION
-            or manifest.get("source_sha256") != fastgen.sha256(source)):
+            or manifest.get("source_sha256") != fastgen.sha256(source)
+            or manifest.get("backend") != backend):
         return False
     checks = [(manifest.get("text_file"), manifest.get("text_sha256"))]
     checks += [(item.get("path"), item.get("sha256")) for item in manifest.get("tables", [])]
     checks += [(item.get("path"), item.get("sha256")) for item in manifest.get("assets", [])]
+    checks += [(item.get("path"), item.get("sha256")) for item in manifest.get("artifacts", [])]
     return all(path and digest and Path(path).is_file() and fastgen.sha256(path) == digest
                for path, digest in checks)
 
@@ -260,6 +292,7 @@ def _reset_managed_output(output_dir: Path, manifest_path: Path):
     managed = [manifest.get("text_file")]
     managed += [item.get("path") for item in manifest.get("tables", [])]
     managed += [item.get("path") for item in manifest.get("assets", [])]
+    managed += [item.get("path") for item in manifest.get("artifacts", [])]
     managed.append(str(manifest_path))
     for value in managed:
         if not value:
@@ -275,25 +308,38 @@ def _reset_managed_output(output_dir: Path, manifest_path: Path):
             directory.rmdir()
 
 
-def ingest(source: Path, output_dir: Path, force=False):
+def ingest(source: Path, output_dir: Path, force=False, backend="fast"):
     source = source.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     if source.suffix.lower() not in SUPPORTED | IMAGE_TYPES:
         raise ValueError(f"Unsupported material type: {source.suffix or source.name}")
+    if backend not in {"fast", "auto", "docling"}:
+        raise ValueError(f"Unknown ingestion backend: {backend}")
+    selected_backend = backend
+    if backend == "auto":
+        selected_backend = (
+            "docling" if source.suffix.lower() in ({".pdf"} | IMAGE_TYPES)
+            and importlib.util.find_spec("docling") is not None else "fast"
+        )
+    if selected_backend == "docling" and importlib.util.find_spec("docling") is None:
+        raise RuntimeError(
+            "The Docling backend is optional; install the project with the complex extra."
+        )
     manifest_path = output_dir / "material.json"
     if not force and manifest_path.is_file():
         manifest = fastgen.load(manifest_path)
-        if _cache_valid(manifest, source):
+        if _cache_valid(manifest, source, selected_backend):
             return {
                 "status": "pass", "manifest": str(manifest_path),
                 "text": manifest["text_file"], "cache_hit": True,
                 "units": len(manifest["units"]), "tables": len(manifest["tables"]),
                 "assets": len(manifest["assets"]),
+                "backend": selected_backend,
             }
     _reset_managed_output(output_dir, manifest_path)
-    units, tables, assets = _parse(source, output_dir)
+    units, tables, assets, artifacts = _parse(source, output_dir, selected_backend)
     chunks = []
     for unit in units:
         label = unit["kind"].title()
@@ -304,9 +350,10 @@ def ingest(source: Path, output_dir: Path, force=False):
     manifest = {
         "version": VERSION, "status": "pass",
         "source": str(source), "source_sha256": fastgen.sha256(source),
-        "source_type": source.suffix.lower(), "text_file": str(text_file),
+        "source_type": source.suffix.lower(), "backend": selected_backend,
+        "requested_backend": backend, "text_file": str(text_file),
         "text_sha256": fastgen.sha256(text_file),
-        "units": units, "tables": tables, "assets": assets,
+        "units": units, "tables": tables, "assets": assets, "artifacts": artifacts,
         "needs_ocr": source.suffix.lower() in IMAGE_TYPES or (
             source.suffix.lower() == ".pdf" and sum(len(x.get("text", "")) for x in units) < 40
         ),
@@ -315,7 +362,7 @@ def ingest(source: Path, output_dir: Path, force=False):
     return {
         "status": "pass", "manifest": str(manifest_path), "text": str(text_file),
         "cache_hit": False, "units": len(units), "tables": len(tables),
-        "assets": len(assets),
+        "assets": len(assets), "backend": selected_backend,
     }
 
 
@@ -324,9 +371,11 @@ def main():
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--backend", choices=("fast", "auto", "docling"), default="fast")
     args = parser.parse_args()
     try:
-        print(json.dumps(ingest(args.input, args.output_dir, args.force), ensure_ascii=False, indent=2))
+        print(json.dumps(ingest(args.input, args.output_dir, args.force, args.backend),
+                         ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
         print(f"material_ingest: {exc}", file=sys.stderr)

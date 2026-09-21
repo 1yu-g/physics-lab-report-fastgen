@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "physics-lab-report-fastgen"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local CLI and Codex skill for verified Chinese physics lab reports"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,7 @@ analysis = [
 ]
 ocr = ["img2table[rapidocr]>=2.0.0,<3.0"]
 figures = ["schemdraw>=0.20"]
+complex = ["docling>=2.70"]
 all = [
   "pandas>=2.2", "scipy>=1.14", "sympy>=1.13", "pint>=0.24",
   "uncertainties>=3.2", "matplotlib>=3.9",
@@ -35,5 +36,7 @@ labfast = "labfast:main"
 package-dir = {"" = "scripts"}
 py-modules = [
   "labfast", "workflow", "material_ingest", "table_ocr", "analyze_data",
-  "figure_tools", "fastgen", "docx_patch", "template_profile",
+  "figure_tools", "fastgen", "docx_patch", "template_profile", "draft_report",
+  "review_dashboard",
+  "benchmark",
 ]

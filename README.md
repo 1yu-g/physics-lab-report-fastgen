@@ -13,16 +13,17 @@ python -m pip install -e .
 powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1
 ~~~
 
-需要完整 OCR、数据分析和绘图能力时运行 `python -m pip install -e ".[all]"`。安装后可直接使用 `labfast` 命令；不安装 CLI 时仍可使用 `python scripts/labfast.py`。已有 Skill 安装运行 `powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1 -Update`。
+需要完整 OCR、数据分析和绘图能力时运行 `python -m pip install -e ".[all]"`。复杂扫描件的 Docling 后端单独运行 `python -m pip install -e ".[complex]"`，避免拖慢普通报告环境。安装后可直接使用 `labfast` 命令；不安装 CLI 时仍可使用 `python scripts/labfast.py`。已有 Skill 安装运行 `powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1 -Update`。
 
 ## 最短工作流
 
 ~~~powershell
 python scripts/labfast.py preflight --mode core
-python scripts/labfast.py prepare --workdir work --guide "实验指导书.pdf" --template "报告模板.docx" --section "一、实验目的" --scope "仅完成第一项，封面不动"
-# 依据材料填写 work/report.json；需要计算时填入 analysis_plan。
+python scripts/labfast.py start --workdir work --guide "实验指导书.pdf" --template "报告模板.docx" --section "一、实验目的" --scope "仅完成第一项，封面不动"
+# 依据 work/draft-brief.json 改写并核对 work/report.json；需要计算时填入 analysis_plan。
 python scripts/labfast.py run --workdir work
-# 检查 work/review.json 的 changed_pages，并标记已检查页面。
+# 浏览器逐页核对并保存状态，也可直接编辑 work/review.json。
+python scripts/labfast.py review serve --workdir work --open
 python scripts/labfast.py finalize --workdir work
 ~~~
 
@@ -39,6 +40,12 @@ python scripts/labfast.py ingest --input "实验讲义.pptx" --output-dir work/m
 python scripts/labfast.py data plan --input work/ocr/table-1.csv --output work/analysis-plan.json --x I_mA --y U_mV --unit I_mA=mA --unit U_mV=mV
 ~~~
 
-[多格式资料解析](references/material-ingest.md) · [快速增量流程](references/fast-workflow.md) · [报告 JSON 格式](references/spec-schema.md) · [渲染与复核](references/workflow.md) · [开源设计参考](references/research-notes.md)
+`start` 在 `prepare` 基础上生成 `draft-brief.json`，并把能确定来源的章节摘录填入草稿。摘录状态明确标为需要改写和核对，不能直接作为最终实验结论。复杂扫描文件可显式使用 `labfast ingest --backend docling`；普通资料继续使用默认的快速解析器。性能变化可记录为可比较的 JSON：
+
+~~~powershell
+labfast benchmark --input "实验指导书.pdf" --output-dir work/benchmark --runs 3
+~~~
+
+[第三阶段工作流](references/phase3-workflow.md) · [多格式资料解析](references/material-ingest.md) · [快速增量流程](references/fast-workflow.md) · [报告 JSON 格式](references/spec-schema.md) · [渲染与复核](references/workflow.md) · [开源设计参考](references/research-notes.md)
 
 测试：`python -m unittest discover -s tests -v`。许可证：MIT。
