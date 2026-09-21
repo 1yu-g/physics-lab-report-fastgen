@@ -229,7 +229,7 @@ DEPENDENCY_GROUPS = {
         "pandas": "pandas", "scipy": "scipy", "sympy": "sympy",
         "pint": "pint", "uncertainties": "uncertainties", "matplotlib": "matplotlib",
     },
-    "ocr": {"img2table": "img2table", "rapidocr_onnxruntime": "rapidocr-onnxruntime"},
+    "ocr": {"img2table": "img2table", "rapidocr": "img2table[rapidocr]"},
 }
 
 
