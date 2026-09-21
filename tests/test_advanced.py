@@ -49,6 +49,8 @@ class AdvancedWorkflowTest(unittest.TestCase):
                 ],
             })
             result = analyze_data.analyze(plan, root / "analysis")
+            cached_analysis = analyze_data.analyze(plan, root / "analysis")
+            self.assertTrue(cached_analysis["cache_hit"])
             analysis_path = Path(result["analysis"])
             analysis = analyze_data.check_analysis(analysis_path)
             self.assertAlmostEqual(analysis["results"]["voltage"]["mean"]["value"], 5.05)
@@ -57,7 +59,10 @@ class AdvancedWorkflowTest(unittest.TestCase):
             self.assertAlmostEqual(analysis["results"]["resistance"]["result"]["uncertainty"], 0.141421356, places=7)
             self.assertEqual(analysis["results"]["resistance"]["result"]["unit"], "ohm")
             figure = root / "fit.png"
-            figure_tools.plot_fit(analysis_path, "fit", figure)
+            first_figure = figure_tools.plot_fit(analysis_path, "fit", figure)
+            self.assertFalse(first_figure["cache_hit"])
+            cached_figure = figure_tools.plot_fit(analysis_path, "fit", figure)
+            self.assertTrue(cached_figure["cache_hit"])
             self.assertTrue(figure.is_file())
             self.assertGreater(figure.stat().st_size, 10000)
             spec = {"sections": [{"blocks": [{"text": "斜率 {{result.fit.slope.value:.3f}} {{result.fit.slope.unit}}"}]}]}

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -20,6 +23,11 @@ HEAD = re.compile(r"^(?:[一二三四五六七八九十]+|\d+)[、.．]\s*\S+")
 FIGURE = re.compile(r"(?:图|Fig\.?)\s*\d+[\w.-]*", re.IGNORECASE)
 TABLE = re.compile(r"(?:表|Table)\s*\d+[\w.-]*", re.IGNORECASE)
 PLACEHOLDER = re.compile(r"\{\{[^{}]+\}\}")
+EXTRACT_CACHE_VERSION = "1"
+
+
+def _cache_key(path: Path):
+    return f"{fastgen.sha256(path)}-{path.suffix.lower().lstrip('.') or 'file'}"
 
 
 def document_text(path: Path):
@@ -42,30 +50,66 @@ def document_text(path: Path):
     return "", None, 0
 
 
-def record(path: Path, role: str, text_dir: Path, index: int):
+def record(path: Path, role: str, text_dir: Path, index: int, cache_dir: Path | None = None,
+           profile_payload=None):
     path = path.expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
+    digest = fastgen.sha256(path)
     item = {
         "role": role, "path": str(path), "name": path.name,
-        "size_bytes": path.stat().st_size, "sha256": fastgen.sha256(path),
+        "size_bytes": path.stat().st_size, "sha256": digest,
     }
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
         with Image.open(path) as image:
             item["dimensions"] = list(image.size)
         item["visual_review_required"] = True
+        item["cache_hit"] = False
     else:
-        content, page_count, image_count = document_text(path)
-        item.update({
-            "pages": page_count, "embedded_images": image_count,
-            "characters": len(content),
-            "figure_mentions": sorted(set(FIGURE.findall(content))),
-            "table_mentions": sorted(set(TABLE.findall(content))),
-        })
+        cache_dir = (cache_dir or text_dir / ".cache").resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        key = _cache_key(path)
+        metadata_path = cache_dir / f"{key}.json"
+        cached_text = cache_dir / f"{key}.txt"
+        cached = fastgen.load(metadata_path) if metadata_path.is_file() else None
+        if profile_payload:
+            content = "\n".join(anchor["text"] for anchor in profile_payload.get("anchors", []))
+            payload = {
+                "pages": None,
+                "embedded_images": profile_payload.get("inline_images", 0),
+                "characters": len(content),
+                "figure_mentions": sorted(set(FIGURE.findall(content))),
+                "table_mentions": sorted(set(TABLE.findall(content))),
+            }
+            item["cache_hit"] = True
+            item["profile_hit"] = True
+        elif (cached and cached.get("version") == EXTRACT_CACHE_VERSION
+                and cached.get("sha256") == digest
+                and (not cached.get("has_text") or cached_text.is_file())):
+            content = cached_text.read_text(encoding="utf-8") if cached.get("has_text") else ""
+            payload = cached["payload"]
+            item["cache_hit"] = True
+        else:
+            content, page_count, image_count = document_text(path)
+            payload = {
+                "pages": page_count, "embedded_images": image_count,
+                "characters": len(content),
+                "figure_mentions": sorted(set(FIGURE.findall(content))),
+                "table_mentions": sorted(set(TABLE.findall(content))),
+            }
+            if content:
+                cached_text.write_text(content, encoding="utf-8")
+            fastgen.dump(metadata_path, {
+                "version": EXTRACT_CACHE_VERSION, "sha256": digest,
+                "has_text": bool(content), "payload": payload,
+            })
+            item["cache_hit"] = False
+        item.update(payload)
         if content:
             text_dir.mkdir(parents=True, exist_ok=True)
             text_path = text_dir / f"{index:02d}-{role}.txt"
-            text_path.write_text(content, encoding="utf-8")
+            if not text_path.is_file() or text_path.read_text(encoding="utf-8") != content:
+                text_path.write_text(content, encoding="utf-8")
             item["extracted_text"] = str(text_path.resolve())
         if role == "template" and path.suffix.lower() == ".docx":
             item["headings"] = [line.strip() for line in content.splitlines() if HEAD.match(line.strip())]
@@ -73,7 +117,7 @@ def record(path: Path, role: str, text_dir: Path, index: int):
     return item
 
 
-def prepare(workdir: Path, guides, template, images, data, sections, scope):
+def prepare(workdir: Path, guides, template, images, data, sections, scope, profile=None):
     workdir = workdir.resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     files = []
@@ -85,14 +129,25 @@ def prepare(workdir: Path, guides, template, images, data, sections, scope):
         raise ValueError("Provide at least one guide, template, image, or data file.")
     if template and Path(template).suffix.lower() != ".docx":
         raise ValueError("The template must be DOCX; convert old DOC files before prepare.")
+    profile_payload = None
+    if profile:
+        if not template:
+            raise ValueError("A template profile requires --template.")
+        import template_profile
+        template_profile.check(Path(profile), Path(template))
+        profile_payload = fastgen.load(profile)
     for index, (role, path) in enumerate(paths, 1):
-        files.append(record(Path(path), role, workdir / "source-text", index))
+        files.append(record(Path(path), role, workdir / "source-text", index,
+                            workdir / ".cache" / "extract",
+                            profile_payload if role == "template" else None))
     chosen = list(sections)
     if not chosen:
         template_item = next((item for item in files if item["role"] == "template"), {})
         chosen = template_item.get("headings", [])
     inventory = {
         "scope": scope, "requested_sections": list(sections),
+        "template_profile": str(Path(profile).resolve()) if profile else None,
+        "template_profile_sha256": fastgen.sha256(profile) if profile else None,
         "files": files,
         "needs_human_or_agent_review": [
             "Confirm requested sections and draft content against the guide.",
@@ -112,7 +167,8 @@ def prepare(workdir: Path, guides, template, images, data, sections, scope):
             ],
         })
     return {"inventory": str(inventory_path), "draft_spec": str(spec_path),
-            "files": len(files), "sections": len(chosen)}
+            "files": len(files), "sections": len(chosen),
+            "cache_hits": sum(bool(item.get("cache_hit")) for item in files)}
 
 
 def validate_spec(spec: dict, base: Path, required_sections):
@@ -165,6 +221,51 @@ def find_soffice():
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+DEPENDENCY_GROUPS = {
+    "core": {"docx": "python-docx", "PIL": "Pillow", "pypdf": "pypdf"},
+    "analysis": {
+        "pandas": "pandas", "scipy": "scipy", "sympy": "sympy",
+        "pint": "pint", "uncertainties": "uncertainties", "matplotlib": "matplotlib",
+    },
+    "ocr": {"img2table": "img2table", "rapidocr_onnxruntime": "rapidocr-onnxruntime"},
+}
+
+
+def preflight(mode="core"):
+    modes = {
+        "core": ("core",),
+        "analysis": ("core", "analysis"),
+        "ocr": ("core", "ocr"),
+        "full": tuple(DEPENDENCY_GROUPS),
+    }
+    if mode not in modes:
+        raise ValueError(f"Unknown preflight mode: {mode}")
+    groups = {}
+    missing = []
+    for group in modes[mode]:
+        status = {}
+        for module, package in DEPENDENCY_GROUPS[group].items():
+            available = importlib.util.find_spec(module) is not None
+            status[module] = {"available": available, "package": package}
+            if not available:
+                missing.append(package)
+        groups[group] = status
+    renderers = {
+        "libreoffice": find_soffice(),
+        "pdftoppm": shutil.which("pdftoppm"),
+    }
+    return {
+        "status": "pass" if not missing else "needs-install",
+        "mode": mode,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "groups": groups,
+        "missing_packages": sorted(set(missing)),
+        "renderers": renderers,
+        "render_ready": bool(renderers["libreoffice"] and renderers["pdftoppm"]),
+    }
 
 
 def render(docx_path: Path, preview_dir: Path, pdf_path=None, renderer="auto"):
@@ -237,6 +338,28 @@ def resolve_results(spec, analysis):
     return replace(spec)
 
 
+def _build_fingerprint(spec_path: Path, spec: dict, template: Path | None):
+    files = {}
+    for section in spec.get("sections", []):
+        for block in section.get("blocks", []):
+            if block.get("type") != "figure" or not block.get("path"):
+                continue
+            path = Path(block["path"])
+            path = path if path.is_absolute() else spec_path.parent / path
+            path = path.resolve()
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            files[str(path)] = fastgen.sha256(path)
+    payload = {
+        "builder_version": fastgen.VERSION,
+        "spec_sha256": fastgen.sha256(spec_path),
+        "template_sha256": fastgen.sha256(template) if template else None,
+        "referenced_files": files,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest(), payload
+
+
 def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, renderer="auto"):
     workdir = workdir.resolve()
     inventory_path = workdir / "inventory.json"
@@ -291,44 +414,98 @@ def run(workdir: Path, spec_path=None, template=None, output=None, pdf=None, ren
     template_hash = fastgen.sha256(template) if template else None
     template_images = len(Document(template).inline_shapes) if template else 0
     template_math = len(Document(template).element.xpath(".//m:oMath")) if template else 0
-    qa = fastgen.build(build_spec_path, output, template)
-    if template and fastgen.sha256(template) != template_hash:
-        raise RuntimeError("Source template changed during build.")
-    for key, actual_key, baseline in (("figure", "inline_images", template_images),
-                                      ("formula", "native_math_objects", template_math)):
-        actual = qa[actual_key] - baseline
-        if actual != counts[key]:
+    fingerprint, fingerprint_payload = _build_fingerprint(build_spec_path, spec, template)
+    build_cache = workdir / ".cache" / "build.json"
+    cached = fastgen.load(build_cache) if build_cache.is_file() else {}
+    qa_path = output.with_suffix(".qa.json")
+    cache_hit = bool(
+        cached.get("fingerprint") == fingerprint
+        and output.is_file() and qa_path.is_file()
+        and cached.get("output_sha256") == fastgen.sha256(output)
+    )
+    if cache_hit:
+        qa = fastgen.load(qa_path)
+    else:
+        qa = fastgen.build(build_spec_path, output, template)
+        if template and fastgen.sha256(template) != template_hash:
+            raise RuntimeError("Source template changed during build.")
+        for key, actual_key, baseline in (("figure", "inline_images", template_images),
+                                          ("formula", "native_math_objects", template_math)):
+            actual = qa[actual_key] - baseline
+            if actual != counts[key]:
+                qa["status"] = "needs-fix"
+                qa.setdefault("count_mismatch", {})[key] = {"expected": counts[key], "actual": actual}
+        if qa["table_blocks"] != counts["table"]:
             qa["status"] = "needs-fix"
-            qa.setdefault("count_mismatch", {})[key] = {"expected": counts[key], "actual": actual}
-    if qa["table_blocks"] != counts["table"]:
-        qa["status"] = "needs-fix"
-    if analysis_path:
-        qa["analysis_manifest"] = str(analysis_path)
-        qa["analysis_sha256"] = fastgen.sha256(analysis_path)
-    fastgen.dump(output.with_suffix(".qa.json"), qa)
+        if analysis_path:
+            qa["analysis_manifest"] = str(analysis_path)
+            qa["analysis_sha256"] = fastgen.sha256(analysis_path)
+        fastgen.dump(qa_path, qa)
+        fastgen.dump(build_cache, {
+            "fingerprint": fingerprint, "inputs": fingerprint_payload,
+            "output": str(output), "output_sha256": fastgen.sha256(output),
+        })
     if qa["status"] != "pass":
-        raise RuntimeError(f"Structural QA failed: {output.with_suffix('.qa.json')}")
-    return _write_review(workdir, output, pdf, renderer)
+        raise RuntimeError(f"Structural QA failed: {qa_path}")
+    result = _write_review(workdir, output, pdf, renderer)
+    result["build_cache_hit"] = cache_hit
+    return result
 
 
 def _write_review(workdir: Path, docx: Path, pdf, renderer):
+    review_path = workdir / "review.json"
+    old_review = fastgen.load(review_path) if review_path.is_file() else {}
+    docx_hash = fastgen.sha256(docx)
+    old_pages = {}
+    for page in old_review.get("pages", []):
+        preview = Path(page.get("preview", ""))
+        digest = page.get("preview_sha256")
+        if not digest and preview.is_file():
+            digest = fastgen.sha256(preview)
+        if digest:
+            old_pages[int(page["page"])] = {"sha256": digest, "status": page.get("status", "pending")}
+    cached_pages_valid = all(
+        Path(page.get("preview", "")).is_file()
+        and page.get("preview_sha256") == fastgen.sha256(page["preview"])
+        for page in old_review.get("pages", [])
+    )
+    if (pdf is None and old_review.get("docx_sha256") == docx_hash
+            and old_review.get("pages") and cached_pages_valid):
+        return {
+            "status": old_review["status"], "docx": str(docx),
+            "qa": str(docx.with_suffix(".qa.json")), "review": str(review_path),
+            "pages": len(old_review["pages"]), "changed_pages": [],
+            "render_cache_hit": True,
+        }
     pdf_path, previews = render(docx, workdir / "preview", pdf, renderer)
+    pages = []
+    changed_pages = []
+    for index, path in enumerate(previews, 1):
+        digest = fastgen.sha256(path)
+        old = old_pages.get(index)
+        unchanged = bool(old and old["sha256"] == digest)
+        status = "pass" if unchanged and old.get("status") == "pass" else "pending"
+        if not unchanged:
+            changed_pages.append(index)
+        pages.append({
+            "page": index, "preview": str(path), "preview_sha256": digest,
+            "changed": not unchanged, "status": status, "notes": "",
+        })
     review = {
         "status": "needs-visual-review" if previews else "render-unavailable",
-        "docx": str(docx), "docx_sha256": fastgen.sha256(docx),
+        "docx": str(docx), "docx_sha256": docx_hash,
         "pdf": str(pdf_path) if pdf_path else None,
+        "pdf_sha256": fastgen.sha256(pdf_path) if pdf_path else None,
         "criteria": ["scope", "cover", "no_watermark", "page_layout", "figures",
                      "tables", "formula_symbols", "units", "captions", "data_provenance"],
-        "pages": [
-            {"page": i, "preview": str(path), "status": "pending", "notes": ""}
-            for i, path in enumerate(previews, 1)
-        ],
+        "pages": pages,
+        "changed_pages": changed_pages,
     }
-    review_path = workdir / "review.json"
     fastgen.dump(review_path, review)
     return {"status": review["status"], "docx": str(docx),
             "qa": str(docx.with_suffix(".qa.json")),
-            "review": str(review_path), "pages": len(previews)}
+            "review": str(review_path), "pages": len(previews),
+            "changed_pages": changed_pages, "render_cache_hit": False}
 
 
 def _checked_report(workdir: Path):
@@ -358,7 +535,9 @@ def finalize(workdir: Path):
     pages = review.get("pages", [])
     if (not pages or
         [page.get("page") for page in pages] != list(range(1, len(pages) + 1)) or
-        any(page.get("status") != "pass" or not Path(page.get("preview", "")).is_file()
+        any(page.get("status") != "pass"
+            or not Path(page.get("preview", "")).is_file()
+            or page.get("preview_sha256") != fastgen.sha256(page["preview"])
             for page in pages)):
         raise ValueError("Inspect every rendered page and set each page status to pass before finalizing.")
     result = {"status": "pass", "docx": str(docx), "pdf": review.get("pdf"),
@@ -378,6 +557,8 @@ def cli():
     p.add_argument("--data", action="append", type=Path, default=[])
     p.add_argument("--section", action="append", default=[])
     p.add_argument("--scope", default="")
+    p.add_argument("--profile", type=Path,
+                   help="Validate the template against a reusable template profile")
     p = sub.add_parser("run", help="Build, structurally check, and render page previews")
     p.add_argument("--workdir", type=Path, required=True)
     p.add_argument("--spec", type=Path)
@@ -390,6 +571,8 @@ def cli():
     p.add_argument("--pdf", type=Path, required=True)
     p = sub.add_parser("finalize", help="Verify page-by-page review and mark delivery ready")
     p.add_argument("--workdir", type=Path, required=True)
+    p = sub.add_parser("preflight", help="Check the runtime before starting a report")
+    p.add_argument("--mode", choices=("core", "analysis", "ocr", "full"), default="core")
     return parser.parse_args()
 
 
@@ -398,11 +581,13 @@ def main():
     try:
         if args.command == "prepare":
             result = prepare(args.workdir, args.guide, args.template, args.image,
-                             args.data, args.section, args.scope)
+                             args.data, args.section, args.scope, args.profile)
         elif args.command == "run":
             result = run(args.workdir, args.spec, args.template, args.output, args.pdf, args.renderer)
         elif args.command == "preview":
             result = preview(args.workdir, args.pdf)
+        elif args.command == "preflight":
+            result = preflight(args.mode)
         else:
             result = finalize(args.workdir)
         print(json.dumps(result, ensure_ascii=False, indent=2))

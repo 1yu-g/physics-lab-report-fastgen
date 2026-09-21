@@ -41,6 +41,11 @@ class WorkflowIntegrationTest(unittest.TestCase):
                 ["一、实验目的", "二、实验原理"], "仅前两项，封面不动"
             )
             self.assertEqual(result["files"], 3)
+            repeated = workflow.prepare(
+                work, [guide], template, [figure], [],
+                ["一、实验目的", "二、实验原理"], "仅前两项，封面不动"
+            )
+            self.assertEqual(repeated["cache_hits"], 2)
             inventory = fastgen.load(work / "inventory.json")
             self.assertIn("{{姓名}}", inventory["files"][1]["placeholders"])
             self.assertEqual(inventory["requested_sections"], ["一、实验目的", "二、实验原理"])
@@ -58,6 +63,9 @@ class WorkflowIntegrationTest(unittest.TestCase):
             fastgen.dump(work / "report.json", spec)
             result = workflow.run(work, renderer="none")
             self.assertEqual(result["status"], "render-unavailable")
+            self.assertFalse(result["build_cache_hit"])
+            cached_build = workflow.run(work, renderer="none")
+            self.assertTrue(cached_build["build_cache_hit"])
             built = Document(result["docx"])
             self.assertEqual(built.styles["Normal"].font.name, "Arial")
             self.assertIn("姓名：示例", built.paragraphs[0].text)
@@ -80,7 +88,13 @@ class WorkflowIntegrationTest(unittest.TestCase):
                 review = fastgen.load(work / "review.json")
                 review["pages"][0]["status"] = "pass"
                 fastgen.dump(work / "review.json", review)
+                repeated_preview = workflow.preview(work, pdf)
+                self.assertEqual(repeated_preview["changed_pages"], [])
+                self.assertEqual(fastgen.load(work / "review.json")["pages"][0]["status"], "pass")
                 self.assertEqual(workflow.finalize(work)["pages_reviewed"], 1)
+                Path(review["pages"][0]["preview"]).write_bytes(b"changed")
+                with self.assertRaisesRegex(ValueError, "Inspect every rendered page"):
+                    workflow.finalize(work)
 
 
 if __name__ == "__main__":

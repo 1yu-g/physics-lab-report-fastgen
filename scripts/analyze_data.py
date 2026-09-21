@@ -86,7 +86,6 @@ def _number_series(frame, name):
 
 
 def analyze(config_path: Path, output_dir: Path):
-    pd, scipy, sp, pint, uncertainties, stats, ufloat = _dependencies()
     config_path = config_path.expanduser().resolve()
     config = fastgen.load(config_path)
     source = Path(config["input"])
@@ -100,11 +99,26 @@ def analyze(config_path: Path, output_dir: Path):
         review_path = review_path if review_path.is_absolute() else config_path.parent / review_path
         review_path = review_path.resolve()
         table_ocr.check_verified(review_path, source)
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cached_path = output_dir / "analysis.json"
+    if cached_path.is_file():
+        cached = fastgen.load(cached_path)
+        expected_review_hash = fastgen.sha256(review_path) if review_path else None
+        if (cached.get("input_sha256") == fastgen.sha256(source)
+                and cached.get("config_sha256") == fastgen.sha256(config_path)
+                and cached.get("ocr_review_sha256") == expected_review_hash):
+            try:
+                checked = check_analysis(cached_path)
+            except (ValueError, FileNotFoundError, KeyError):
+                pass
+            else:
+                return {"status": checked["status"], "analysis": str(cached_path),
+                        "operations": len(checked["results"]), "cache_hit": True}
+    pd, scipy, sp, pint, uncertainties, stats, ufloat = _dependencies()
     frame = pd.read_csv(source, encoding="utf-8-sig")
     if frame.empty:
         raise ValueError("Input table has no data rows.")
-    output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     units = config.get("units", {})
     registry = pint.UnitRegistry()
     results = {}
@@ -210,7 +224,8 @@ def analyze(config_path: Path, output_dir: Path):
     }
     path = output_dir / "analysis.json"
     fastgen.dump(path, output)
-    return {"status": "pass", "analysis": str(path), "operations": len(results)}
+    return {"status": "pass", "analysis": str(path), "operations": len(results),
+            "cache_hit": False}
 
 
 def check_analysis(path: Path):

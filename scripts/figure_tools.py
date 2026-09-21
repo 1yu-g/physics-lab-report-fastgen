@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -84,6 +85,23 @@ def preprocess(source: Path, output: Path, crop=None, rotate=0.0,
 
 
 def plot_fit(analysis_path: Path, fit_id: str, output: Path, title=""):
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path = output.with_suffix(".figure.json")
+    import analyze_data
+    report = analyze_data.check_analysis(analysis_path)
+    analysis_hash = fastgen.sha256(analysis_path)
+    if manifest_path.is_file() and output.is_file():
+        cached = fastgen.load(manifest_path)
+        if (cached.get("source_analysis_sha256") == analysis_hash
+                and cached.get("fit_id") == fit_id
+                and cached.get("title", "") == title
+                and cached.get("output_sha256") == fastgen.sha256(output)):
+            cached["cache_hit"] = True
+            return cached
+    mpl_cache = output.parent / ".matplotlib-cache"
+    mpl_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -91,8 +109,6 @@ def plot_fit(analysis_path: Path, fit_id: str, output: Path, title=""):
         import pandas as pd
     except ImportError as exc:
         raise RuntimeError("Plotting needs requirements-analysis.txt.") from exc
-    import analyze_data
-    report = analyze_data.check_analysis(analysis_path)
     fit = report["results"].get(fit_id)
     if not fit or fit["type"] != "linear_fit":
         raise ValueError(f"Unknown linear-fit result: {fit_id}")
@@ -120,21 +136,25 @@ def plot_fit(analysis_path: Path, fit_id: str, output: Path, title=""):
     residual_ax.set_xlabel(f"{x_name} / {x_unit}")
     residual_ax.set_ylabel(f"Residual / {y_unit}")
     residual_ax.grid(alpha=0.25)
-    output = output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight")
     plt.close(fig)
     manifest = {
         "kind": "data_plot", "source_analysis": str(analysis_path.resolve()),
         "source_analysis_sha256": fastgen.sha256(analysis_path),
-        "fit_id": fit_id, "output": str(output),
+        "fit_id": fit_id, "title": title, "output": str(output),
         "output_sha256": fastgen.sha256(output),
+        "cache_hit": False,
     }
-    fastgen.dump(output.with_suffix(".figure.json"), manifest)
+    fastgen.dump(manifest_path, manifest)
     return manifest
 
 
 def schematic(spec_path: Path, output: Path):
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    mpl_cache = output.parent / ".matplotlib-cache"
+    mpl_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
     try:
         import schemdraw
         import schemdraw.elements as elm
@@ -165,8 +185,6 @@ def schematic(spec_path: Path, output: Path):
         if item.get("label"):
             element = element.label(str(item["label"]))
         drawing.add(element)
-    output = output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
     drawing.save(str(output), dpi=220)
     manifest = {
         "kind": "schematic", "source_spec": str(spec_path),
