@@ -1,6 +1,6 @@
 # Physics Lab Report FastGen
 
-从实验指导书、模板、图片和真实数据生成中文大学物理实验报告的 Codex Skill。保留原模板，另存 DOCX；报告内容由源材料决定，脚本负责清点、组装、计算和检查。
+从实验指导书、模板、图片和真实数据生成中文大学物理实验报告的独立命令行工具，并附带 Codex Skill 调用层。保留原模板，另存 DOCX；报告内容由源材料决定，工具负责资料解析、OCR、组装、计算和检查。CLI 可以脱离 Skill 单独使用。
 
 ## 安装
 
@@ -9,21 +9,21 @@
 ~~~powershell
 git clone https://github.com/1yu-g/physics-lab-report-fastgen.git
 cd physics-lab-report-fastgen
-python -m pip install -r requirements.txt
+python -m pip install -e .
 powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1
 ~~~
 
-已有安装运行 `powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1 -Update`。
+需要完整 OCR、数据分析和绘图能力时运行 `python -m pip install -e ".[all]"`。安装后可直接使用 `labfast` 命令；不安装 CLI 时仍可使用 `python scripts/labfast.py`。已有 Skill 安装运行 `powershell -ExecutionPolicy Bypass -File scripts/install_skill.ps1 -Update`。
 
 ## 最短工作流
 
 ~~~powershell
-python scripts/workflow.py preflight --mode core
-python scripts/workflow.py prepare --workdir work --guide "实验指导书.pdf" --template "报告模板.docx" --section "一、实验目的" --scope "仅完成第一项，封面不动"
+python scripts/labfast.py preflight --mode core
+python scripts/labfast.py prepare --workdir work --guide "实验指导书.pdf" --template "报告模板.docx" --section "一、实验目的" --scope "仅完成第一项，封面不动"
 # 依据材料填写 work/report.json；需要计算时填入 analysis_plan。
-python scripts/workflow.py run --workdir work
+python scripts/labfast.py run --workdir work
 # 检查 work/review.json 的 changed_pages，并标记已检查页面。
-python scripts/workflow.py finalize --workdir work
+python scripts/labfast.py finalize --workdir work
 ~~~
 
 没有自动渲染时，从生成的 DOCX 导出 PDF，然后运行 `python scripts/workflow.py preview --workdir work --pdf "报告.pdf"`，无需再次构建 Word。
@@ -32,6 +32,13 @@ python scripts/workflow.py finalize --workdir work
 
 记录表照片先运行 `table_ocr.py extract`，逐格核对并修正 CSV，再运行 `verify`。在 `report.json` 中引用 `analysis_plan` 和图表的 `fit_id` 后，`run` 会自动完成分析、拟合图和结果填充。详见 [进阶流程](references/advanced-workflow.md)。
 
-[快速增量流程](references/fast-workflow.md) · [报告 JSON 格式](references/spec-schema.md) · [渲染与复核](references/workflow.md) · [开源设计参考](references/research-notes.md)
+`prepare` 会把 PDF、DOCX、PPTX、XLSX、CSV、TSV 和文本资料统一解析为带来源位置的 Markdown、可编辑 CSV、原始图片和 JSON 清单，并按内容哈希复用。也可单独运行：
+
+~~~powershell
+python scripts/labfast.py ingest --input "实验讲义.pptx" --output-dir work/materials/guide
+python scripts/labfast.py data plan --input work/ocr/table-1.csv --output work/analysis-plan.json --x I_mA --y U_mV --unit I_mA=mA --unit U_mV=mV
+~~~
+
+[多格式资料解析](references/material-ingest.md) · [快速增量流程](references/fast-workflow.md) · [报告 JSON 格式](references/spec-schema.md) · [渲染与复核](references/workflow.md) · [开源设计参考](references/research-notes.md)
 
 测试：`python -m unittest discover -s tests -v`。许可证：MIT。

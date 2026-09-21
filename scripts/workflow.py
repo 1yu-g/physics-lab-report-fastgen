@@ -83,6 +83,23 @@ def record(path: Path, role: str, text_dir: Path, index: int, cache_dir: Path | 
             }
             item["cache_hit"] = True
             item["profile_hit"] = True
+        elif path.suffix.lower() in {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".csv", ".tsv"}:
+            import material_ingest
+            ingestion = material_ingest.ingest(path, cache_dir / "materials" / key)
+            manifest = fastgen.load(ingestion["manifest"])
+            content = Path(ingestion["text"]).read_text(encoding="utf-8")
+            payload = {
+                "pages": len(manifest["units"]) if path.suffix.lower() == ".pdf" else None,
+                "source_units": len(manifest["units"]),
+                "embedded_images": len(manifest["assets"]),
+                "extracted_tables": len(manifest["tables"]),
+                "characters": len(content),
+                "figure_mentions": sorted(set(FIGURE.findall(content))),
+                "table_mentions": sorted(set(TABLE.findall(content))),
+                "structured_manifest": ingestion["manifest"],
+                "needs_ocr": manifest.get("needs_ocr", False),
+            }
+            item["cache_hit"] = ingestion["cache_hit"]
         elif (cached and cached.get("version") == EXTRACT_CACHE_VERSION
                 and cached.get("sha256") == digest
                 and (not cached.get("has_text") or cached_text.is_file())):

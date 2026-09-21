@@ -7,12 +7,18 @@
 先检查原图。必要时用 `figure_tools.py preprocess` 生成旋转、裁剪或对比度调整后的副本；原图不覆盖。识别、核对分开进行：
 
 ~~~powershell
-python scripts/table_ocr.py extract --input "记录表.png" --output-dir work/ocr
+python scripts/labfast.py ocr extract --input "记录表.png" --output-dir work/ocr
 # 对照原图和 ocr-review.png 逐格纠正 work/ocr/table-1.csv 后：
-python scripts/table_ocr.py verify --manifest work/ocr/ocr-review.json --table-id 1 --note "逐格核对并修正读数"
+python scripts/labfast.py ocr verify --manifest work/ocr/ocr-review.json --table-id 1 --note "逐格核对并修正读数"
 ~~~
 
-CSV 首行应是列名。核对数字、符号、小数点、表头和单位；模糊读数不能猜测。识别结果在明确核对前不可用于计算，原图或 CSV 变化后需重新核对。
+CSV 首行应是列名。核对数字、符号、小数点、表头和单位；模糊读数不能猜测。相同原图和参数再次运行 `extract` 会直接复用结果，避免重新加载 OCR 模型；确需重新识别时加 `--force`。`verify` 会在清单中记录相对 OCR 原值发生变化的单元格。识别结果在明确核对前不可用于计算，原图或已验证 CSV 变化后需重新核对。
+
+常用的均值和线性拟合计划可以直接生成，再补充本实验特有的公式：
+
+~~~powershell
+python scripts/labfast.py data plan --input work/ocr/table-1.csv --ocr-review work/ocr/ocr-review.json --output work/analysis-plan.json --summary U_mV --type-b U_mV=0.02 --x I_mA --y U_mV --unit I_mA=mA --unit U_mV=mV
+~~~
 
 ## 一次运行分析与绘图
 

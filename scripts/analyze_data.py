@@ -4,14 +4,105 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import json
 import math
 import operator
+import re
 import sys
 from pathlib import Path
 
 import fastgen
 import table_ocr
+
+
+def _assignments(values, cast=str):
+    result = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError(f"Expected COLUMN=VALUE: {value}")
+        key, raw = value.split("=", 1)
+        key = key.strip()
+        if not key or key in result:
+            raise ValueError(f"Duplicate or empty assignment: {value}")
+        result[key] = cast(raw.strip())
+    return result
+
+
+def create_plan(input_path: Path, output: Path, summaries=None, x=None, y=None,
+                fit_id="fit", units=None, type_b=None, ocr_review=None):
+    input_path = input_path.expanduser().resolve()
+    output = output.expanduser().resolve()
+    if not input_path.is_file():
+        raise FileNotFoundError(input_path)
+    if input_path.suffix.lower() not in {".csv", ".tsv"}:
+        raise ValueError("Analysis plans require a CSV or TSV input table.")
+    delimiter = "\t" if input_path.suffix.lower() == ".tsv" else ","
+    with input_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.reader(stream, delimiter=delimiter))
+    if len(rows) < 2 or not rows[0]:
+        raise ValueError("Input table needs a header and at least one data row.")
+    columns = [str(value).strip() for value in rows[0]]
+    if any(not value for value in columns) or len(columns) != len(set(columns)):
+        raise ValueError("CSV column names must be nonempty and unique.")
+    summaries = list(summaries or [])
+    if len(summaries) != len(set(summaries)):
+        raise ValueError("Summary columns must be unique.")
+    operations = []
+    type_b_values = _assignments(type_b, float)
+    for summary_index, column in enumerate(summaries, 1):
+        if column not in columns:
+            raise ValueError(f"Column not found: {column}")
+        suffix = re.sub(r"[^A-Za-z0-9_]", "_", column).strip("_") or str(summary_index)
+        operation = {"id": f"summary_{suffix}", "type": "summary", "column": column}
+        if column in type_b_values:
+            operation["type_b"] = type_b_values[column]
+        operations.append(operation)
+    if bool(x) != bool(y):
+        raise ValueError("Specify both --x and --y for a linear fit.")
+    if x and y:
+        if x not in columns or y not in columns:
+            raise ValueError("Fit columns must exist in the input table.")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", fit_id):
+            raise ValueError("Fit id must be an ASCII identifier for result placeholders.")
+        operations.append({"id": fit_id, "type": "linear_fit", "x": x, "y": y})
+    if not operations:
+        raise ValueError("Add at least one --summary or an --x/--y fit pair.")
+    unknown_type_b = set(type_b_values) - set(summaries)
+    if unknown_type_b:
+        raise ValueError(f"Type-B uncertainty has no matching summary: {sorted(unknown_type_b)}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    def portable(path):
+        if path is None:
+            return None
+        path = Path(path).expanduser().resolve()
+        try:
+            return str(path.relative_to(output.parent))
+        except ValueError:
+            return str(path)
+
+    unit_values = _assignments(units)
+    unknown_units = set(unit_values) - set(columns)
+    if unknown_units:
+        raise ValueError(f"Units name unknown columns: {sorted(unknown_units)}")
+    operation_ids = [item["id"] for item in operations]
+    if len(operation_ids) != len(set(operation_ids)):
+        raise ValueError("Generated operation ids collide; choose another --fit-id.")
+    plan = {
+        "input": portable(input_path),
+        "units": unit_values,
+        "operations": operations,
+    }
+    if ocr_review:
+        if not Path(ocr_review).expanduser().is_file():
+            raise FileNotFoundError(ocr_review)
+        plan["ocr_review"] = portable(ocr_review)
+    fastgen.dump(output, plan)
+    return {
+        "status": "pass", "plan": str(output), "columns": columns,
+        "data_rows": len(rows) - 1, "operations": len(operations),
+    }
 
 
 def _dependencies():
@@ -116,7 +207,8 @@ def analyze(config_path: Path, output_dir: Path):
                 return {"status": checked["status"], "analysis": str(cached_path),
                         "operations": len(checked["results"]), "cache_hit": True}
     pd, scipy, sp, pint, uncertainties, stats, ufloat = _dependencies()
-    frame = pd.read_csv(source, encoding="utf-8-sig")
+    frame = pd.read_csv(source, encoding="utf-8-sig",
+                        sep="\t" if source.suffix.lower() == ".tsv" else ",")
     if frame.empty:
         raise ValueError("Input table has no data rows.")
     units = config.get("units", {})
@@ -259,6 +351,16 @@ def cli():
     p.add_argument("--output-dir", type=Path, required=True)
     p = sub.add_parser("check")
     p.add_argument("--analysis", type=Path, required=True)
+    p = sub.add_parser("plan", help="Create an explicit analysis plan from a reviewed table")
+    p.add_argument("--input", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--ocr-review", type=Path)
+    p.add_argument("--summary", action="append", default=[])
+    p.add_argument("--type-b", action="append", default=[], metavar="COLUMN=VALUE")
+    p.add_argument("--x")
+    p.add_argument("--y")
+    p.add_argument("--fit-id", default="fit")
+    p.add_argument("--unit", action="append", default=[], metavar="COLUMN=UNIT")
     return parser.parse_args()
 
 
@@ -267,9 +369,14 @@ def main():
     try:
         if args.command == "run":
             result = analyze(args.config, args.output_dir)
-        else:
+        elif args.command == "check":
             report = check_analysis(args.analysis)
             result = {"status": report["status"], "operations": len(report["results"])}
+        else:
+            result = create_plan(
+                args.input, args.output, args.summary, args.x, args.y,
+                args.fit_id, args.unit, args.type_b, args.ocr_review,
+            )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:

@@ -12,6 +12,31 @@ from PIL import Image, ImageDraw
 
 import fastgen
 
+OCR_CACHE_VERSION = "2"
+
+
+def _reset_managed_output(output_dir: Path, manifest_path: Path):
+    if not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return
+    if not manifest_path.is_file():
+        if any(output_dir.iterdir()):
+            raise ValueError("OCR output directory is not empty and has no review manifest.")
+        return
+    manifest = fastgen.load(manifest_path)
+    managed = [manifest.get("preview")]
+    managed += [item.get("csv") for item in manifest.get("tables", [])]
+    managed.append(str(manifest_path))
+    for value in managed:
+        if not value:
+            continue
+        path = Path(value).resolve()
+        try:
+            path.relative_to(output_dir)
+        except ValueError as exc:
+            raise ValueError("OCR manifest points outside its output directory.") from exc
+        path.unlink(missing_ok=True)
+
 
 def _ocr_engine(name: str, language: str):
     try:
@@ -32,12 +57,33 @@ def _ocr_engine(name: str, language: str):
 
 
 def extract(source: Path, output_dir: Path, engine="rapidocr", language="ch",
-            confidence=50, borderless=False):
+            confidence=50, borderless=False, force=False):
     source = source.expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "ocr-review.json"
+    options = {
+        "engine": engine, "language": language,
+        "confidence": int(confidence), "borderless": bool(borderless),
+    }
+    if not force and manifest_path.is_file():
+        cached = fastgen.load(manifest_path)
+        preview = Path(cached.get("preview", ""))
+        tables_exist = all(Path(item.get("csv", "")).is_file()
+                           for item in cached.get("tables", []))
+        if (cached.get("cache_version") == OCR_CACHE_VERSION
+                and cached.get("source_sha256") == fastgen.sha256(source)
+                and cached.get("options") == options
+                and preview.is_file()
+                and cached.get("preview_sha256") == fastgen.sha256(preview)
+                and cached.get("tables") and tables_exist):
+            return {
+                "status": cached["status"], "manifest": str(manifest_path),
+                "preview": str(preview), "table_count": len(cached["tables"]),
+                "cache_hit": True,
+            }
+    _reset_managed_output(output_dir, manifest_path)
     try:
         from img2table.document import Image as TableImage
     except ImportError as exc:
@@ -52,11 +98,11 @@ def extract(source: Path, output_dir: Path, engine="rapidocr", language="ch",
     preview = Image.open(source).convert("RGB")
     drawer = ImageDraw.Draw(preview)
     manifest = {
+        "cache_version": OCR_CACHE_VERSION,
         "status": "needs-review",
         "source": str(source),
         "source_sha256": fastgen.sha256(source),
-        "engine": engine,
-        "language": language,
+        "engine": engine, "language": language, "options": options,
         "tables": [],
     }
     for table_id, table in enumerate(tables, 1):
@@ -94,10 +140,11 @@ def extract(source: Path, output_dir: Path, engine="rapidocr", language="ch",
     preview_path = output_dir / "ocr-review.png"
     preview.save(preview_path)
     manifest["preview"] = str(preview_path)
-    path = output_dir / "ocr-review.json"
-    fastgen.dump(path, manifest)
-    return {"status": manifest["status"], "manifest": str(path),
-            "preview": str(preview_path), "table_count": len(tables)}
+    manifest["preview_sha256"] = fastgen.sha256(preview_path)
+    fastgen.dump(manifest_path, manifest)
+    return {"status": manifest["status"], "manifest": str(manifest_path),
+            "preview": str(preview_path), "table_count": len(tables),
+            "cache_hit": False}
 
 
 def verify_table(manifest_path: Path, table_id: int, note: str):
@@ -108,6 +155,10 @@ def verify_table(manifest_path: Path, table_id: int, note: str):
     source = Path(manifest["source"])
     if fastgen.sha256(source) != manifest["source_sha256"]:
         raise ValueError("Source image changed; repeat OCR.")
+    preview = Path(manifest.get("preview", ""))
+    if (manifest.get("preview_sha256")
+            and (not preview.is_file() or fastgen.sha256(preview) != manifest["preview_sha256"])):
+        raise ValueError("OCR review preview changed; repeat OCR.")
     table = next((item for item in manifest["tables"] if item["id"] == table_id), None)
     if table is None:
         raise ValueError(f"Unknown table id: {table_id}")
@@ -123,6 +174,27 @@ def verify_table(manifest_path: Path, table_id: int, note: str):
     table["columns"] = max(map(len, rows))
     table["status"] = "verified"
     table["review_note"] = note.strip()
+    original = {
+        (int(cell["row"]), int(cell["column"])): str(cell.get("value", ""))
+        for cell in table.get("cells", [])
+    }
+    corrections = []
+    row_count = max(len(rows), max((key[0] for key in original), default=0))
+    column_count = max(max((len(row) for row in rows), default=0),
+                       max((key[1] for key in original), default=0))
+    for row_index in range(1, row_count + 1):
+        for column_index in range(1, column_count + 1):
+            before = original.get((row_index, column_index), "")
+            after = (rows[row_index - 1][column_index - 1]
+                     if row_index <= len(rows) and column_index <= len(rows[row_index - 1])
+                     else "")
+            if before != after:
+                corrections.append({
+                    "row": row_index, "column": column_index,
+                    "ocr": before, "verified": after,
+                })
+    table["corrections"] = corrections
+    table["correction_count"] = len(corrections)
     manifest["status"] = (
         "verified" if all(item["status"] == "verified" for item in manifest["tables"])
         else "needs-review"
@@ -158,6 +230,8 @@ def cli():
     p.add_argument("--language", default="ch")
     p.add_argument("--confidence", type=int, default=50)
     p.add_argument("--borderless", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="Discard the matching cached OCR result and run recognition again")
     p = sub.add_parser("verify")
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--table-id", type=int, required=True)
@@ -170,7 +244,7 @@ def main():
     try:
         if args.command == "extract":
             result = extract(args.input, args.output_dir, args.engine,
-                             args.language, args.confidence, args.borderless)
+                             args.language, args.confidence, args.borderless, args.force)
         else:
             result = verify_table(args.manifest, args.table_id, args.note)
         print(json.dumps(result, ensure_ascii=False, indent=2))

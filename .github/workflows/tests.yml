@@ -13,4 +13,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -r requirements-figures.txt
+      - run: python -m pip install --no-deps -e .
+      - run: labfast --version
       - run: python -m unittest discover -s tests -v
